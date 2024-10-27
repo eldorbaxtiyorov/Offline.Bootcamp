@@ -54,7 +54,7 @@ public class Arrays
 
     public int FindMissingNumber(int[] nums)
     {
-    
+        
         if(nums.Length==1 && nums[0]==0) return 1;
         var min=nums.Min();
         var max=nums.Max();
