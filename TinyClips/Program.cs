@@ -1,43 +1,94 @@
 ﻿using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Text.RegularExpressions;
 using Spectre.Console;
 
-Dictionary<string, ProgressTask> tasks = [];
+var exitTokenSource = new CancellationTokenSource();
+Console.CancelKeyPress += (c, a) => exitTokenSource.Cancel();
 
 while (true)
 {
     var files = AskFiles();
-    var encoder = "libx264"; // AskForVideoEncoder();
     var preset = AskPresetSpeed();
-
+    await StartEncodingAsync(files, preset, exitTokenSource.Token);
 }
 
-static async Task TestProgress(IEnumerable<string> files)
+static async Task StartEncodingAsync(
+    IEnumerable<string> files, 
+    string preset,
+    CancellationToken cancellationToken = default)
 {
 
     await AnsiConsole.Progress()
         .AutoClear(false)
         .Columns([
-            new ProgressBarColumn()
+            new TaskDescriptionColumn(),
+            new ProgressBarColumn(),
+            new PercentageColumn()
         ])
         .StartAsync(async ctx => 
         {
             var durationsDictionary = new ConcurrentDictionary<string, double>();
-            await Task.WhenAll(files.Select(x => Task.Run(async () => durationsDictionary[x] = await GetVideoDuration(x))));
-            
-            Dictionary<string, (ProgressTask, double)> tasks = [];
 
-            files.ToList()
-                .ForEach(async file => 
+            await Task.WhenAll(
+                files.Select(x => Task.Run(async () => durationsDictionary[x] = await GetVideoDuration(x, cancellationToken))));
+            
+            var tasks = files.Select(async file => 
+            {
+                var task = ctx.AddTask(Path.GetFileName(file));
+
+                await Task.Run(async () => 
                 {
-                    var task = ctx.AddTask(Path.GetFileName(file));
-                    tasks[file] = (task, durationsDictionary[file]);
-                });
+                    using var process = new Process();
+
+                    var outputPath = Path.Combine(Path.GetDirectoryName(file)!, Path.GetFileNameWithoutExtension(file) + "-compressed.mp4");
+
+                    process.StartInfo.FileName = "ffmpeg";
+                    process.StartInfo.Arguments = $"-y -i \"{file}\" -l warning -vcodec libx264 -global_quality 25 -preset {preset} -acodec copy \"{outputPath}\" -threads 5";
+                    process.StartInfo.RedirectStandardOutput = true;
+                    process.StartInfo.RedirectStandardError = true;
+                    process.StartInfo.UseShellExecute = false;
+                    process.StartInfo.CreateNoWindow = true;
+
+                    process.OutputDataReceived += TaskFailed;
+                    process.ErrorDataReceived += UpdateProgress;
+
+                    process.Start();
+
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+
+                    await process.WaitForExitAsync(cancellationToken);
+                }, cancellationToken);
+
+                task.Value = 100;
+                task.StopTask();
+
+                void TaskFailed(object sender, DataReceivedEventArgs e)
+                {
+                    Console.WriteLine(e.Data);
+                }
+
+                void UpdateProgress(object sender, DataReceivedEventArgs e)
+                {
+                    if (string.IsNullOrEmpty(e.Data)) return;
+
+                    var match = Regex.Match(e.Data, @"time=(\d+:\d+:\d+\.\d+)");
+                    if (match.Success && durationsDictionary.TryGetValue(file, out var duration))
+                    {
+                        var currentTime = TimeSpan.Parse(match.Groups[1].Value).TotalSeconds;
+                        var progress = (currentTime / duration) * 100;
+                        task.Value = progress; 
+                    }
+                }
+            });
+
+            await Task.WhenAll(tasks);
         });
 
 }
 
-static async Task<double> GetVideoDuration(string path)
+static async Task<double> GetVideoDuration(string path, CancellationToken cancellationToken = default)
 {
     using var process = new Process();
 
@@ -49,7 +100,7 @@ static async Task<double> GetVideoDuration(string path)
 
     process.Start();
     string output = process.StandardOutput.ReadToEnd();
-    process.WaitForExit();
+    await process.WaitForExitAsync(cancellationToken);
 
     return double.Parse(output);
 }
