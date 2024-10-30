@@ -28,7 +28,7 @@ static async Task StartEncodingAsync(
         ])
         .StartAsync(async ctx => 
         {
-            var durationsDictionary = new ConcurrentDictionary<string, double>();
+            var durationsDictionary = new Dictionary<string, double>();
 
             await Task.WhenAll(
                 files.Select(x => Task.Run(async () => durationsDictionary[x] = await GetVideoDuration(x, cancellationToken))));
